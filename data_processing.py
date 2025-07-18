@@ -1,167 +1,98 @@
 # =============================================================================
-# SCRIPT 01: DATA ACQUISITION AND PROCESSING (ENHANCED – 4 assets)
+# SCRIPT 01: DATA ACQUISITION AND PROCESSING  (4‑Asset Enhanced)
 # =============================================================================
-import yfinance as yf
-import pandas as pd, numpy as np, matplotlib.pyplot as plt, seaborn as sns
+import os, yfinance as yf, pandas as pd, numpy as np, seaborn as sns, matplotlib.pyplot as plt
 from scipy.stats import jarque_bera, kurtosis
-import os, textwrap
 
 def data_processing_and_summary():
-    """
-    Download, clean, summarise S&P500, Nasdaq‑100, EUR/USD, USD/JPY
-    并执行多项数据质量检查与可视化。
-    """
-
-    # ------------------------------------------------------------------
-    # 1 ‑ PARAMETERS
-    # ------------------------------------------------------------------
-    tickers = ['^GSPC', '^NDX', 'EUR=X', 'JPY=X']
-    col_map = {'^GSPC': 'SPX',
-               '^NDX':  'NDX',
-               'EUR=X': 'EURUSD',
-               'JPY=X': 'USDJPY'}
-
-    start_date, end_date = '2007-01-01', '2025-06-01'
-    output_file = 'spx_ndx_eurusd_usdjpy_daily.csv'
-    plot_dir = 'data_quality_plots'
+    # ---------- 1. Parameters ----------
+    tickers     = ['^GSPC', '^NDX', 'EUR=X', 'JPY=X']       # S&P500 / NASDAQ100 / EURUSD / USDJPY
+    rename_map  = {'^GSPC': 'SPX', '^NDX': 'NDX', 'EUR=X':'EURUSD', 'JPY=X':'USDJPY'}
+    start_date  = '2007-01-01'
+    end_date    = '2025-06-01'
+    csv_out     = 'spx_ndx_eurusd_usdjpy_daily.csv'         # <-- downstream filename
+    plot_dir    = 'data_quality_plots'
     os.makedirs(plot_dir, exist_ok=True)
 
-    # ------------------------------------------------------------------
-    # 2 ‑ DOWNLOAD
-    # ------------------------------------------------------------------
-    print(f"\nDownloading {tickers}  ({start_date} → {end_date}) …")
-    price_raw = yf.download(tickers, start=start_date, end=end_date,
-                            auto_adjust=False, progress=False)['Close']
-    price_raw.rename(columns=col_map, inplace=True)
-    print(f"Rows fetched: {len(price_raw)}")
+    # ---------- 2. Download ----------
+    print(f"Downloading {tickers}  ({start_date} → {end_date}) …")
+    px = yf.download(tickers, start=start_date, end=end_date, auto_adjust=False)['Close']
+    print(f"Rows fetched: {len(px)}")
 
-    # ------------------------------------------------------------------
-    # 3 ‑ CLEAN & RETURNS
-    # ------------------------------------------------------------------
-    price = price_raw.dropna()
-    print(f"Aligned rows (no NaNs): {len(price)}  "
-          f"(dropped {len(price_raw)-len(price)})")
+    # ---------- 3. Basic cleaning ----------
+    px = px.rename(columns=rename_map).dropna()
+    print(f"Aligned rows (no NaNs): {len(px)}  (dropped {len(px.index)-len(px)} )")
 
-    returns = np.log(price/price.shift(1)).rename(
-        columns={c: f"{c}_Return" for c in price.columns})
+    # log‑returns (%)
+    ret = np.log(px / px.shift(1))
+    ret.columns = [f"{c}_Return" for c in ret.columns]
+    data = pd.concat([px, ret], axis=1).dropna()
+    data.to_csv(csv_out)
+    print(f"Saved cleaned data → {csv_out}")
 
-    final = pd.concat([price, returns], axis=1).dropna()
-    final.to_csv(output_file)
-    print(f"Saved cleaned data → {output_file}\n")
+    # ---------- 4. Descriptive stats (Table 4.1) ----------
+    returns = data[[c for c in data.columns if c.endswith('_Return')]]
+    desc = returns.describe().T
+    desc['Skewness'] = returns.skew()
+    desc['Kurtosis'] = returns.kurtosis()
+    desc['Kurtosis_scipy'] = [kurtosis(returns[c], fisher=False) for c in returns]
+    jb = [jarque_bera(returns[c]) for c in returns]
+    desc['Jarque-Bera'] = [x[0] for x in jb]
+    desc['JB p-value']  = [x[1] for x in jb]
 
-    # ------------------------------------------------------------------
-    # 4 ‑ DESCRIPTIVE STATISTICS
-    # ------------------------------------------------------------------
-    desc_stats = returns.describe().T
+    print("\n" + "="*80)
+    print(">>> OUTPUT FOR DISSERTATION: TABLE 4.1 <<<")
+    keep_cols = ['mean','std','min','max','Skewness','Kurtosis',
+                 'Kurtosis_scipy','Jarque-Bera','JB p-value']
+    print(desc[keep_cols].to_markdown(floatfmt=".4f"))
+    print("="*80)
 
-    # pandas 指标
-    desc_stats['Skewness'] = returns.skew()
-    desc_stats['Kurtosis'] = returns.kurtosis()
+    # ---------- 5. Data‑quality checks ----------
+    print("\n>>> ENHANCED DATA QUALITY CHECKS <<<")
+    extremes = {
+        'EURUSD': data[abs(data['EURUSD_Return']) > 0.03],
+        'USDJPY': data[abs(data['USDJPY_Return']) > 0.03],
+        'SPX'   : data[abs(data['SPX_Return' ]) > 0.05],
+        'NDX'   : data[abs(data['NDX_Return' ]) > 0.06],
+    }
+    for k,v in extremes.items():
+        print(f"{k} extreme returns : {len(v)}")
 
-    def safe_kurt(arr):
-        try:
-            val = kurtosis(arr, fisher=False, nan_policy='omit')
-            return np.nan if np.isinf(val) else val
-        except Exception:
-            return np.nan
-
-    def safe_jb(arr):
-        try:
-            jb = jarque_bera(arr)
-            # 若返回 inf -> nan
-            return (np.nan if np.isinf(jb[0]) else jb[0],
-                    np.nan if np.isinf(jb[1]) else jb[1])
-        except Exception:
-            return (np.nan, np.nan)
-
-    desc_stats['Kurtosis_scipy'] = [safe_kurt(returns[c].dropna()) for c in returns]
-
-    jb_vals = [safe_jb(returns[c].dropna()) for c in returns]
-    desc_stats['Jarque-Bera'] = [v[0] for v in jb_vals]
-    desc_stats['JB p-value']  = [v[1] for v in jb_vals]
-
-    # ------------------------------------------------------------------
-    # 5 ‑ DATA‑QUALITY CHECKS
-    # ------------------------------------------------------------------
-    print(">>> ENHANCED DATA QUALITY CHECKS <<<\n")
-
-    # 5‑1  Extreme‑value detection (asset‑specific thresholds)
-    thr = {'SPX':0.05, 'NDX':0.06, 'EURUSD':0.03, 'USDJPY':0.03}
-    extremes = {}
-    for asset in price.columns:
-        rname = f"{asset}_Return"
-        extremes[asset] = final[(final[rname] < -thr[asset]) |
-                                (final[rname] >  thr[asset])]
-        print(f"{asset} extreme returns (>|{thr[asset]*100:.0f}%|): "
-              f"{len(extremes[asset])}")
-
-    # 5‑2  Continuity (gap) check
-    print("\n--- Data Continuity Check ---")
-    gap_days = (final.asfreq('B').index.to_series().diff()
-                           .dt.days.dropna())
-    gaps = gap_days[gap_days > 3]
-    if gaps.empty:
-        print("No significant gaps (beyond weekends).")
+    # ---------- 6. Gaps ----------
+    gaps = data.asfreq('B').index.to_series().diff().dt.days.gt(3)
+    if gaps.any():
+        print("Gaps >3 days detected!")
     else:
-        print(f"Detected {len(gaps)} gaps (>3 days). Top 5:")
-        for i,(idx,days) in enumerate(gaps.items()):
-            if i==5: break
-            prev = final.index[final.index.get_loc(idx)-1]
-            print(f"  {prev.date()} → {idx.date()}  ({days} days)")
+        print("\n--- Data Continuity Check ---\nNo significant gaps (beyond weekends).")
 
-    # ------------------------------------------------------------------
-    # 6 ‑ VISUALISATION
-    # ------------------------------------------------------------------
+    # ---------- 7. Quick visualisations ----------
     print("\n--- Generating visualisations ---")
+    # 7.1 price series
+    fig, ax = plt.subplots(2,2, figsize=(11,7), sharex=True)
+    for a, col, ttl in zip(ax.ravel(),
+                           ['EURUSD','USDJPY','SPX','NDX'],
+                           ['EURUSD Price','USDJPY Price','SPX Price','NDX Price']):
+        a.plot(data[col]); a.set_title(ttl); a.grid(True)
+    plt.tight_layout(); plt.savefig(f"{plot_dir}/price_series.png"); plt.close()
 
-    # 6‑1  Price series
-    fig, ax = plt.subplots(2,2, figsize=(14,10))
-    for i,asset in enumerate(price.columns):
-        price[asset].plot(ax=ax[i//2, i%2],
-                          title=f"{asset} Price")
-        ax[i//2, i%2].grid(True)
-    plt.tight_layout()
-    plt.savefig(f"{plot_dir}/price_series.png")
-    plt.close()
+    # 7.2 return hist
+    fig, ax = plt.subplots(2,2, figsize=(11,7))
+    for a, col in zip(ax.ravel(),
+                      ['EURUSD_Return','USDJPY_Return','SPX_Return','NDX_Return']):
+        sns.histplot(data[col], bins=50, kde=True, ax=a)
+        a.set_title(f"{col.split('_')[0]} Return Dist"); a.axvline(0, ls='--', c='r')
+    plt.tight_layout(); plt.savefig(f"{plot_dir}/return_hist.png"); plt.close()
 
-    # 6‑2  Return histograms
-    fig, ax = plt.subplots(2,2, figsize=(14,10))
-    for i,asset in enumerate(price.columns):
-        sns.histplot(final[f"{asset}_Return"], ax=ax[i//2, i%2],
-                     bins=50, kde=True)
-        ax[i//2, i%2].axvline(0, ls='--', c='red')
-        ax[i//2, i%2].set_title(f"{asset} Return Dist")
-    plt.tight_layout()
-    plt.savefig(f"{plot_dir}/return_hist.png")
-    plt.close()
-
-    # 6‑3  Extreme returns marked (example: SPX & EURUSD)
-    fig, ax = plt.subplots(2,1, figsize=(14,8), sharex=True)
-    for j,(asset,color) in enumerate([('SPX','blue'), ('EURUSD','green')]):
-        r = final[f"{asset}_Return"]
-        ax[j].plot(r, color=color, alpha=.7, label=f"{asset} Daily Returns")
-        ax[j].scatter(extremes[asset].index,
-                      extremes[asset][f"{asset}_Return"],
-                      color='red', s=30, label='Extreme')
-        ax[j].axhline(thr[asset], ls='--', c='gray')
-        ax[j].axhline(-thr[asset], ls='--', c='gray')
-        ax[j].legend(); ax[j].grid(True)
-    plt.tight_layout()
-    plt.savefig(f"{plot_dir}/extreme_events.png")
-    plt.close()
     print(f"Plots saved to “{plot_dir}/”")
 
-    # ------------------------------------------------------------------
-    # 7 ‑ QUALITY SUMMARY
-    # ------------------------------------------------------------------
+    # ---------- 8. Report ----------
     print("\n>>> DATA QUALITY REPORT SUMMARY <<<")
-    print(f"Observations : {len(final)}")
-    print(f"Date range   : {final.index[0].date()} – {final.index[-1].date()}")
-    for asset in price.columns:
-        print(f"{asset} extremes : {len(extremes[asset])} "
-              f"({len(extremes[asset])/len(final)*100:.2f}%)")
-    print("="*80+"\n")
+    print(f"Observations : {len(data)}")
+    print(f"Date range   : {data.index[0].date()} – {data.index[-1].date()}")
+    for k,v in extremes.items():
+        pct = len(v)/len(data)*100
+        print(f"{k} extremes : {len(v)} ({pct:.2f}%)")
+    print("="*80 + "\n")
 
-# ------------------------------------------------------------------
-if __name__ == '__main__':
+if __name__ == "__main__":
     data_processing_and_summary()

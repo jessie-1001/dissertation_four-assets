@@ -1,5 +1,5 @@
 # =============================================================================
-# SCRIPT 02: MARGINAL MODEL ESTIMATION AND DIAGNOSTICS (STABLE FIXED VERSION)
+# SCRIPT 02: MARGINAL MODEL ESTIMATION AND DIAGNOSTICS (4-ASSET VERSION)
 # =============================================================================
 
 import pandas as pd
@@ -26,8 +26,8 @@ def skewt_pit(std_resid, eta, lam):
     z = std_resid
     u = np.where(
         z < 0,
-        2 * t.cdf(z / (1 - delta), df=eta),
-        1 + (1 - 2 * t.cdf(-z / (1 + delta), df=eta))
+        (1 + lam**2) * t.cdf(z * np.sqrt(1 + lam**2), df=eta),
+        (1 + lam**2) * (1 - t.cdf(-z * np.sqrt(1 + lam**2), df=eta))
     )
     return u
 
@@ -35,10 +35,11 @@ def skewt_pit(std_resid, eta, lam):
 def fit_and_diagnose_garch(return_series, asset_name):
     print(f"\n--- Fitting model for {asset_name} ---")
 
-    if "S&P" in asset_name:
+    # Determine model type based on asset class
+    if asset_name in ['SPX', 'NDX']:  # Equity indices
         model = arch_model(return_series, mean='ARX', lags=1, vol='Garch', p=1, o=1, q=1, dist='t')
         model_desc = "ARMA(1,1)-GJR-GARCH(1,1)-t"
-    else:
+    else:  # FX pairs
         model = arch_model(return_series, mean='ARX', lags=1, vol='EGARCH', p=2, q=1, dist='skewt')
         model_desc = "ARMA(1,1)-EGARCH(2,1)-skewt"
 
@@ -103,45 +104,70 @@ def fit_and_diagnose_garch(return_series, asset_name):
 # ===== MAIN SCRIPT =====
 if __name__ == '__main__':
     print("\n" + "="*80)
-    print(">>> MARGINAL MODEL ESTIMATION AND DIAGNOSTICS <<<")
+    print(">>> MARGINAL MODEL ESTIMATION AND DIAGNOSTICS (4-ASSET) <<<")
 
     try:
-        input_file = 'spx_eurusd_daily_data.csv'
+        # Modified input file for 4 assets
+        input_file = 'spx_ndx_eurusd_usdjpy_daily.csv'
         data = pd.read_csv(input_file, index_col='Date', parse_dates=True)
         in_sample_end = '2019-12-31'
         in_sample_data = data.loc[:in_sample_end]
 
+        # Extract all 4 return series
         spx_returns = in_sample_data['SPX_Return'] * 100
+        ndx_returns = in_sample_data['NDX_Return'] * 100
         eurusd_returns = in_sample_data['EURUSD_Return'] * 100
+        usdjpy_returns = in_sample_data['USDJPY_Return'] * 100
 
         print(f"Sample size: {len(spx_returns)} observations")
         print(f"Date range: {spx_returns.index[0].date()} to {spx_returns.index[-1].date()}")
 
-        result_spx = fit_and_diagnose_garch(spx_returns, 'S&P 500')
-        result_eurusd = fit_and_diagnose_garch(eurusd_returns, 'EUR/USD')
+        # Fit models for all 4 assets
+        results = {}
+        assets = {
+            'SPX': spx_returns,
+            'NDX': ndx_returns,
+            'EURUSD': eurusd_returns,
+            'USDJPY': usdjpy_returns
+        }
+        
+        for asset_name, return_series in assets.items():
+            results[asset_name] = fit_and_diagnose_garch(return_series, asset_name)
 
-        # --- PIT Transform ---
-        std_resid_spx = pd.Series(result_spx.std_resid).dropna()
-        nu_spx = result_spx.params['nu']
-        u_spx = t.cdf(std_resid_spx, df=nu_spx)
+        # --- PIT Transform for all assets ---
+        pit_data = {}
+        
+        # SPX (t-distribution)
+        std_resid_spx = pd.Series(results['SPX'].std_resid).dropna()
+        nu_spx = results['SPX'].params['nu']
+        pit_data['u_spx'] = t.cdf(std_resid_spx, df=nu_spx)
+        
+        # NDX (t-distribution)
+        std_resid_ndx = pd.Series(results['NDX'].std_resid).dropna()
+        nu_ndx = results['NDX'].params['nu']
+        pit_data['u_ndx'] = t.cdf(std_resid_ndx, df=nu_ndx)
+        
+        # EURUSD (skewed-t)
+        std_resid_eurusd = pd.Series(results['EURUSD'].std_resid).dropna()
+        eta_eurusd = results['EURUSD'].params['eta']
+        lambda_eurusd = results['EURUSD'].params['lambda']
+        pit_data['u_eurusd'] = skewt_pit(std_resid_eurusd, eta_eurusd, lambda_eurusd)
+        
+        # USDJPY (skewed-t)
+        std_resid_usdjpy = pd.Series(results['USDJPY'].std_resid).dropna()
+        eta_usdjpy = results['USDJPY'].params['eta']
+        lambda_usdjpy = results['USDJPY'].params['lambda']
+        pit_data['u_usdjpy'] = skewt_pit(std_resid_usdjpy, eta_usdjpy, lambda_usdjpy)
 
-        std_resid_eurusd = pd.Series(result_eurusd.std_resid).dropna()
-        eta_eurusd = result_eurusd.params['eta']
-        lambda_eurusd = result_eurusd.params['lambda']
-        u_eurusd = skewt_pit(std_resid_eurusd, eta_eurusd, lambda_eurusd)
-
-        # --- Align indexes and clip extreme values ---
-        pit_df = pd.DataFrame({
-            'u_spx': u_spx,
-            'u_eurusd': pd.Series(u_eurusd, index=std_resid_eurusd.index)
-        }).dropna().clip(1e-6, 1 - 1e-6)
+        # --- Create aligned DataFrame ---
+        pit_df = pd.DataFrame(pit_data).dropna().clip(1e-6, 1 - 1e-6)
 
         print("\nPIT Validation:")
-        print(f"SPX PIT range: [{pit_df['u_spx'].min():.6f}, {pit_df['u_spx'].max():.6f}]")
-        print(f"EURUSD PIT range: [{pit_df['u_eurusd'].min():.6f}, {pit_df['u_eurusd'].max():.6f}]")
+        for col in pit_df.columns:
+            print(f"{col} range: [{pit_df[col].min():.6f}, {pit_df[col].max():.6f}]")
 
-        pit_df.to_csv("copula_input_data.csv")
-        print("\nData ready for copula modeling saved to 'copula_input_data.csv'.")
+        pit_df.to_csv("copula_input_data_4asset.csv")
+        print("\n4-asset PIT data ready for copula modeling saved to 'copula_input_data_4asset.csv'.")
 
     except FileNotFoundError:
         print(f"Error: The file '{input_file}' was not found. Please run script 01 first.")
