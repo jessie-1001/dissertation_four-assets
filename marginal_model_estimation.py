@@ -159,14 +159,21 @@ if __name__ == '__main__':
         lambda_usdjpy = results['USDJPY'].params['lambda']
         pit_data['u_usdjpy'] = skewt_pit(std_resid_usdjpy, eta_usdjpy, lambda_usdjpy)
 
-        # --- Create aligned DataFrame ---
-        pit_df = pd.DataFrame(pit_data).dropna().clip(1e-6, 1 - 1e-6)
+       # 使用样本内数据从第二个日期开始的索引
+        pit_index = in_sample_data.index[1:]
+        
+        # 创建DataFrame，使用正确的索引
+        pit_df = pd.DataFrame(pit_data, index=pit_index).dropna().clip(1e-6, 1 - 1e-6)
+        pit_df.index.name = 'Date'
+        
+        # 保存到CSV
+        pit_df.to_csv("copula_input_data_4asset.csv")
+        # ================
 
         print("\nPIT Validation:")
         for col in pit_df.columns:
             print(f"{col} range: [{pit_df[col].min():.6f}, {pit_df[col].max():.6f}]")
 
-        pit_df.to_csv("copula_input_data_4asset.csv")
         print("\n4-asset PIT data ready for copula modeling saved to 'copula_input_data_4asset.csv'.")
 
     except FileNotFoundError:
